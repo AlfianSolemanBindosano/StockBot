@@ -193,10 +193,10 @@ function analyzeStock(data) {
     results.recommendation = 'STRONG BUY';
   } else if (results.confidence > 65) {
     results.recommendation = 'BUY';
-  } else if (results.confidence < 40) {
-    results.recommendation = 'SELL';
   } else if (results.confidence < 25) {
     results.recommendation = 'STRONG SELL';
+  } else if (results.confidence < 40) {
+    results.recommendation = 'SELL';
   } else {
     results.recommendation = 'HOLD';
   }

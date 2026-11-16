@@ -1,7 +1,6 @@
 'use strict';
 
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const { yf, fetchHistory } = require('../utils/yahoo');
 const { SMA } = require('technicalindicators');
 const logger = require('../utils/logger');
 
@@ -61,13 +60,8 @@ class IDXQuantTradingEngine {
 
   async getIHSGTrend() {
     try {
-      const history = await yahooFinance.chart('^JKSE', {
-        period1: this.getStartDate(120), // 120 days to ensure enough data for SMA50
-        period2: new Date(),
-        interval: '1d'
-      });
-
-      const closes = history.quotes.map(h => h.close).filter(c => !!c);
+      const quotes = await fetchHistory('^JKSE', 200);
+      const closes = quotes.map(h => h.close).filter(c => !!c);
       const sma20 = SMA.calculate({ values: closes, period: 20 }).pop();
       const sma50 = SMA.calculate({ values: closes, period: 50 }).pop();
       const lastClose = closes[closes.length - 1];
@@ -112,31 +106,36 @@ class IDXQuantTradingEngine {
     ];
 
     try {
-      const quotes = await yahooFinance.quote(sampleTickers);
-      
+      const quotes = await yf.quote(sampleTickers);
+
       let advance = 0;
       let decline = 0;
-      let aboveSMA20 = 0;
       let aboveSMA50 = 0;
+      let aboveSMA200 = 0;
+      let counted = 0;
 
       for (const q of quotes) {
         if (q.regularMarketChange > 0) advance++;
         else if (q.regularMarketChange < 0) decline++;
 
-        if (q.regularMarketPrice > q.fiftyDayAverage) aboveSMA50++;
-        if (q.regularMarketPrice > q.twoHundredDayAverage) aboveSMA20++; 
+        const px = q.regularMarketPrice;
+        if (px == null) continue;
+        counted++;
+        if (q.fiftyDayAverage != null && px > q.fiftyDayAverage) aboveSMA50++;
+        if (q.twoHundredDayAverage != null && px > q.twoHundredDayAverage) aboveSMA200++;
       }
 
       const adRatio = advance / (decline || 1);
-      const pctAboveSMA20 = (aboveSMA20 / sampleTickers.length) * 100;
+      const pctAboveSMA50 = counted ? (aboveSMA50 / counted) * 100 : 0;
+      const pctAboveSMA200 = counted ? (aboveSMA200 / counted) * 100 : 0;
 
       let status = 'Neutral Breadth';
       let score = 0;
 
-      if (adRatio > 1.5 && pctAboveSMA20 > 60) {
+      if (adRatio > 1.5 && pctAboveSMA50 > 60) {
         status = adRatio > 2.5 ? 'Very Strong Breadth' : 'Strong Breadth';
         score = adRatio > 2.5 ? 25 : 15;
-      } else if (adRatio < 1 || pctAboveSMA20 < 40) {
+      } else if (adRatio < 1 || pctAboveSMA50 < 40) {
         status = adRatio < 0.5 ? 'Very Weak Breadth' : 'Weak Breadth';
         score = adRatio < 0.5 ? -25 : -15;
       }
@@ -145,7 +144,8 @@ class IDXQuantTradingEngine {
         advance,
         decline,
         ad_ratio: adRatio.toFixed(2),
-        pct_above_sma20: pctAboveSMA20.toFixed(1),
+        pct_above_sma50: pctAboveSMA50.toFixed(1),
+        pct_above_sma200: pctAboveSMA200.toFixed(1),
         status,
         score
       };
@@ -157,7 +157,7 @@ class IDXQuantTradingEngine {
 
   async getForeignFlow() {
     try {
-      const topForeign = await yahooFinance.quote(['BBCA.JK', 'BBRI.JK', 'BMRI.JK']);
+      const topForeign = await yf.quote(['BBCA.JK', 'BBRI.JK', 'BMRI.JK']);
       const avgChange = topForeign.reduce((acc, q) => acc + (q.regularMarketChangePercent || 0), 0) / 3;
       
       let status = 'Neutral';
@@ -194,7 +194,7 @@ class IDXQuantTradingEngine {
 
     for (const [sector, tickers] of Object.entries(this.sectors)) {
       try {
-        const quotes = await yahooFinance.quote(tickers);
+        const quotes = await yf.quote(tickers);
         const avgPerf = quotes.reduce((acc, q) => acc + (q.regularMarketChangePercent || 0), 0) / tickers.length;
         
         let status = 'Neutral';

@@ -8,6 +8,7 @@ const { withRetry } = require('./src/utils/helpers');
 const { initBot, formatAnalysisMessage, formatMarketMessage } = require('./src/utils/telegram');
 const { IDX_TICKERS } = require('./src/utils/idxTickers');
 const marketEngine = require('./src/recommender/marketEngine');
+const analyst = require('./src/ai/analyst');
 const fs = require('fs');
 const path = require('path');
 
@@ -30,6 +31,35 @@ process.on('SIGINT', () => {
 });
 
 // ─── Analysis Logic ──────────────────────────────────────────────────────────
+
+/**
+ * Ranking key: rule-based score. The ML overlay is deliberately NOT used here —
+ * its cross-sectional AUC is ~0.47, so ranking by mlProb picks stocks no better
+ * than chance. The ML number is used only as a market-timing gate (marketSignal).
+ */
+function sortResults(results) {
+  results.sort((a, b) => b.score - a.score);
+  return results;
+}
+
+/**
+ * Market timing signal. The trained model is NOT a stock picker — measured
+ * cross-sectional AUC is ~0.47 (worse than chance). What it does have is pooled
+ * AUC ~0.59, i.e. it times the market: days whose average mlProb is high saw
+ * +1.3% to +1.9% forward 20d, days below 0.40 saw -5.4%. So the model gates
+ * *whether* to act, while the rule engine still decides *what* to buy.
+ */
+function marketSignal(results) {
+  const scored = results.filter(r => r.mlProb != null);
+  if (!scored.length) return null;
+  const avg = scored.reduce((s, r) => s + r.mlProb, 0) / scored.length;
+  return {
+    avgProb: parseFloat(avg.toFixed(4)),
+    coverage: scored.length / results.length,
+    level: avg >= 0.45 ? 'FAVORABLE' : avg >= 0.40 ? 'NEUTRAL' : avg >= 0.35 ? 'CAUTIOUS' : 'UNFAVORABLE'
+  };
+}
+
 async function runAnalysis(maxPriceOverride = null) {
   const startTime = Date.now();
   
@@ -63,8 +93,8 @@ async function runAnalysis(maxPriceOverride = null) {
   // Filter out skipped stocks and errors
   const finalResults = results.filter(r => !r.skipped && !r.error);
 
-  // Sort by score descending
-  finalResults.sort((a, b) => b.score - a.score);
+  // Sort by ranking score (ML probability when available, else rule-based score)
+  sortResults(finalResults);
 
   // Save to latest.json
   const outputDir = process.env.OUTPUT_DIR || './output';
@@ -73,7 +103,12 @@ async function runAnalysis(maxPriceOverride = null) {
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   logger.info(`[Analysis] ✅ Completed in ${elapsed}s. ${finalResults.length} stocks passed filter.`);
-  
+
+  const signal = marketSignal(finalResults);
+  if (signal) {
+    logger.info(`[Analysis] Market signal: ${signal.level} (avg mlProb ${signal.avgProb}, coverage ${(signal.coverage * 100).toFixed(0)}%)`);
+  }
+
   return finalResults;
 }
 
@@ -117,7 +152,20 @@ bot.onText(/\/saham(?:\s+(\d+))?/, async (msg, match) => {
 
   // 2. Run Stock Analysis
   const results = await runAnalysis(maxPriceOverride);
-  
+
+  const signal = marketSignal(results);
+  if (signal) {
+    const icon = { FAVORABLE: '🟢', NEUTRAL: '🟡', CAUTIOUS: '🟠', UNFAVORABLE: '🔴' }[signal.level];
+    await bot.sendMessage(
+      chatId,
+      `${icon} <b>MARKET TIMING SIGNAL: ${signal.level}</b>\n` +
+      `Rata-rata probabilitas 20 hari: <b>${(signal.avgProb * 100).toFixed(1)}%</b>\n` +
+      `<i>Model terkalibrasi. Ini penentu APAKAH masuk pasar, bukan saham mana yang dipilih.</i>`,
+      { parse_mode: 'HTML' }
+    );
+  }
+
+
   if (results.length > 0) {
     // RS ENHANCEMENT: Send Sector Leaders
     try {
@@ -133,11 +181,21 @@ bot.onText(/\/saham(?:\s+(\d+))?/, async (msg, match) => {
     // Send Grouped Results
     const topResults = results.slice(0, 20); // Show top 20 best stocks across all sectors
     logger.info(`[Telegram] Sending ${topResults.length} grouped recommendations to Chat ID: ${chatId}...`);
-    
+
+    // Advisory layer: sentiment + narration for the rows actually sent.
+    // Runs after ranking; a failure here leaves score/order/label untouched.
     try {
-      const { formatGroupedAnalysisMessage } = require('./src/utils/telegram');
+      await analyst.enrich(topResults);
+    } catch (err) {
+      logger.error(`[AI] enrichment skipped: ${err.message}`);
+    }
+
+    try {
+      const { formatGroupedAnalysisMessage, chunkMessage } = require('./src/utils/telegram');
       const response = formatGroupedAnalysisMessage(topResults);
-      await bot.sendMessage(chatId, response, { parse_mode: 'HTML' });
+      for (const chunk of chunkMessage(response)) {
+        await bot.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
+      }
     } catch (err) {
       logger.error(`[Telegram] Failed to send grouped results: ${err.message}`);
       // Fallback to legacy chunked if grouping fails

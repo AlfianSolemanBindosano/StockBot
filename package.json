@@ -1,35 +1,34 @@
 {
-  "name": "stockbit-scraper",
+  "name": "stockbot",
   "version": "1.0.0",
-  "description": "Realtime Stockbit stock data scraper using Playwright with stealth, cookie-based sessions, and XHR/WebSocket interception.",
+  "description": "Telegram bot for IDX stock screening: rule-based technical analysis, calibrated ML timing gate, optional AI narration.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "scrape": "node index.js",
-    "clear-session": "node tools/clearSession.js",
     "show": "node tools/showLatest.js",
     "show:json": "node tools/showLatest.js --json",
     "show:top": "node tools/showLatest.js --top 20",
     "pm2:start": "pm2 start index.js --name stock-bot",
     "pm2:stop": "pm2 stop stock-bot",
     "pm2:logs": "pm2 logs stock-bot",
-    "pm2:status": "pm2 status stock-bot"
+    "pm2:status": "pm2 status stock-bot",
+    "backtest": "node src/eval/backtest.js",
+    "report": "node src/eval/report.js",
+    "train": "node src/eval/train.js"
   },
   "keywords": [
-    "stockbit",
-    "scraper",
-    "playwright",
+    "idx",
+    "saham",
+    "telegram",
     "stock",
-    "Indonesia"
+    "technical-analysis"
   ],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.4.5",
     "node-telegram-bot-api": "^0.67.0",
-    "sqlite3": "^6.0.1",
     "technicalindicators": "^3.1.0",
-    "uuid": "^14.0.0",
     "winston": "^3.13.0",
     "yahoo-finance2": "^3.14.0"
   }

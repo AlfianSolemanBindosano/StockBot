@@ -1,9 +1,11 @@
 'use strict';
 
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const { yf, fetchHistory } = require('../utils/yahoo');
 const { calculateIndicators } = require('./indicators');
 const { analyzeStock } = require('./analyzer');
+const { getSectorForTicker } = require('../utils/sectorMapping');
+const rsEngine = require('./rsEngine');
+const mlScorer = require('./mlScorer');
 const logger = require('../utils/logger');
 
 let cachedMarketRegime = null;
@@ -19,17 +21,7 @@ async function getMarketRegime() {
   }
 
   try {
-    const symbol = '^JKSE';
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setMonth(startDate.getMonth() - 6);
-
-    const history = await yahooFinance.historical(symbol, {
-      period1: startDate,
-      period2: endDate,
-      interval: '1d'
-    });
-
+    const history = await fetchHistory('^JKSE', 200);
     const indicators = calculateIndicators(history);
     const isBullish = indicators.lastClose > indicators.sma50;
     
@@ -63,7 +55,7 @@ async function getRecommendation(symbol, maxPriceOverride = null) {
     const marketRegime = await getMarketRegime();
 
     // 2. Fetch Analyst Recommendations and Financials
-    const summary = await yahooFinance.quoteSummary(symbol, {
+    const summary = await yf.quoteSummary(symbol, {
       modules: ['recommendationTrend', 'financialData', 'price', 'summaryDetail']
     });
 
@@ -82,23 +74,8 @@ async function getRecommendation(symbol, maxPriceOverride = null) {
     }
 
     // 3. Fetch Historical Data (Daily & Weekly)
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setMonth(startDate.getMonth() - 6);
-
-    // Daily
-    const historyDaily = await yahooFinance.historical(symbol, {
-      period1: startDate,
-      period2: endDate,
-      interval: '1d'
-    });
-
-    // Weekly (for confirmation)
-    const historyWeekly = await yahooFinance.historical(symbol, {
-      period1: startDate,
-      period2: endDate,
-      interval: '1wk'
-    });
+    const historyDaily = await fetchHistory(symbol, 200, '1d');
+    const historyWeekly = await fetchHistory(symbol, 200, '1wk');
 
     if (historyDaily.length < 50) {
       return { symbol, skipped: true, reason: 'Insufficient daily data' };
@@ -123,11 +100,11 @@ async function getRecommendation(symbol, maxPriceOverride = null) {
     // Calculate Sector RS
     let sectorRS = { sector: 'Lainnya', rsScore: 0, rank: 99, isTopTier: false };
     try {
-      const { getSectorForTicker } = require('../utils/sectorMapping');
-      const rsEngine = require('./rsEngine');
       const sector = getSectorForTicker(symbol);
-      const rsData = await rsEngine.calculateStockRS(symbol, sector, historyDaily);
-      const sectorRankings = await rsEngine.getSectorPerformances();
+      const [rsData, sectorRankings] = await Promise.all([
+        rsEngine.calculateStockRS(symbol, sector, historyDaily),
+        rsEngine.getSectorPerformances()
+      ]);
       const sectorData = sectorRankings[sector];
 
       sectorRS = {
@@ -155,6 +132,19 @@ async function getRecommendation(symbol, maxPriceOverride = null) {
 
     if (analysis.skipped) return analysis;
 
+    // 6. Optional ML overlay (no-op when model.json is absent)
+    const ml = mlScorer.score({
+      rsi: indicatorsDaily.rsi,
+      atrPct: (indicatorsDaily.atr / price) * 100,
+      smaSpread: ((indicatorsDaily.sma20 - indicatorsDaily.sma50) / indicatorsDaily.sma50) * 100,
+      volRatio: Math.min(volume / (avgVolume20 || 1), 5),
+      distHigh20: ((price - highestHigh20) / highestHigh20) * 100,
+      macdHist: indicatorsDaily.macd?.histogram ?? 0,
+      marketBullish: marketRegime.isBullish ? 1 : 0,
+      weeklyConfirmed: weeklyConfirmed ? 1 : 0,
+      confidence: analysis.confidence
+    });
+
     return {
       symbol,
       name: summary.price?.longName || symbol,
@@ -162,6 +152,8 @@ async function getRecommendation(symbol, maxPriceOverride = null) {
       recommendation: analysis.recommendation,
       score: analysis.score,
       confidence: analysis.confidence,
+      mlProb: ml ? ml.mlProb : null,
+      mlScore: ml ? ml.mlScore : null,
       weightedScore: analysis.weightedScore,
       rsScore: analysis.rsScore || sectorRS.rsScore,
       sector: analysis.sector || sectorRS.sector,

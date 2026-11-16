@@ -43,7 +43,7 @@ function formatGroupedAnalysisMessage(results) {
   Object.keys(groups).forEach(sector => {
     message += `📂 <b>SEKTOR: ${sector.toUpperCase()}</b>\n`;
     
-    // Sort within sector by score
+    // Sort within sector by rule score (ML overlay is a market-timing gate, not a ranker)
     const sortedStocks = groups[sector].sort((a, b) => b.score - a.score);
     
     sortedStocks.forEach(r => {
@@ -52,7 +52,16 @@ function formatGroupedAnalysisMessage(results) {
       
       message += `• <b>${r.symbol}</b> | Score: <b>${r.score}</b> | RS: <b>${r.rsScore > 0 ? '+' : ''}${r.rsScore.toFixed(1)}</b>\n`;
       message += `  💰 Ent: <b>${r.riskMgmt?.entry || 'N/A'}</b> | SL: <b>${r.riskMgmt?.sl || 'N/A'}</b>\n`;
-      message += `  🎯 TP: <b>${r.riskMgmt?.tp1 || 'N/A'}</b> | ${trendEmoji} <b>${r.recommendation}</b> ${volumeEmoji}\n\n`;
+      message += `  🎯 TP: <b>${r.riskMgmt?.tp1 || 'N/A'}</b> | ${trendEmoji} <b>${r.recommendation}</b> ${volumeEmoji}\n`;
+      // Optional advisory layer. Never affects score, order, or label.
+      if (r.sentiment) {
+        const sEmoji = r.sentiment.label === 'positif' ? '🟢' : r.sentiment.label === 'negatif' ? '🔴' : '⚪';
+        message += `  ${sEmoji} Sentimen: <b>${r.sentiment.label}</b> (${r.sentiment.score > 0 ? '+' : ''}${r.sentiment.score.toFixed(2)})\n`;
+      }
+      if (r.aiNote) {
+        message += `  💬 <i>${escapeHTML(r.aiNote)}</i>\n`;
+      }
+      message += `\n`;
     });
     
     message += `----------------------------\n`;
@@ -75,6 +84,9 @@ function formatAnalysisMessage(results, startIndex = 1) {
     
     message += `🚀 <b>${r.symbol}</b> (${escapeHTML(r.name)})\n`;
     message += `📊 Score: <b>${r.score}</b> | 🎯 Conf: <b>${r.confidence}%</b>\n`;
+    if (r.mlScore != null) {
+      message += `🤖 Prob naik 20d: <b>${r.mlScore}%</b>\n`;
+    }
     message += `💰 Entry: <b>${r.riskMgmt?.entry || 'N/A'}</b> | 🛑 SL: <b>${r.riskMgmt?.sl || 'N/A'}</b>\n`;
     message += `🎯 TP: <b>${r.riskMgmt?.tp1 || 'N/A'}</b> / <b>${r.riskMgmt?.tp2 || 'N/A'}</b>\n`;
     message += `⚖️ RR: <b>1:${r.riskMgmt?.rr || '0.0'}</b> | ${trendEmoji} <b>${trendEmoji === '📈' ? 'Bullish' : 'Bearish'}</b> ${volumeEmoji}\n\n`;
@@ -104,20 +116,31 @@ function formatMarketMessage(market) {
   message += `📊 Score: <b>${market.market_score}</b> | Bias: <b>${market.market_bias}</b>\n`;
   message += `💡 Mode: <i>${market.risk_mode}</i>\n\n`;
   
-  message += `<b>1. IHSG Trend:</b> ${market.analysis.ihsg_trend.status}\n`;
-  message += `└ Price: ${market.analysis.ihsg_trend.price.toFixed(0)} (${market.analysis.ihsg_trend.position})\n\n`;
-  
-  message += `<b>2. Market Breadth:</b> ${market.analysis.market_breadth.status}\n`;
-  message += `└ A/D Ratio: ${market.analysis.market_breadth.ad_ratio} | >SMA20: ${market.analysis.market_breadth.pct_above_sma20}%\n\n`;
-  
-  message += `<b>3. Foreign Flow:</b> ${market.analysis.foreign_flow.status}\n`;
-  message += `└ Daily: ${market.analysis.foreign_flow.daily_net}\n\n`;
-  
+  const ihsg = market.analysis.ihsg_trend || {};
+  message += `<b>1. IHSG Trend:</b> ${ihsg.status || 'UNKNOWN'}\n`;
+  if (ihsg.price != null) {
+    message += `└ Price: ${ihsg.price.toFixed(0)} (${ihsg.position})\n\n`;
+  } else {
+    message += `└ Data IHSG tidak tersedia\n\n`;
+  }
+
+  const breadth = market.analysis.market_breadth || {};
+  message += `<b>2. Market Breadth:</b> ${breadth.status || 'UNKNOWN'}\n`;
+  if (breadth.ad_ratio != null) {
+    message += `└ A/D Ratio: ${breadth.ad_ratio} | >SMA50: ${breadth.pct_above_sma50}% | >SMA200: ${breadth.pct_above_sma200}%\n\n`;
+  } else {
+    message += `└ Data breadth tidak tersedia\n\n`;
+  }
+
+  const foreign = market.analysis.foreign_flow || {};
+  message += `<b>3. Foreign Flow:</b> ${foreign.status || 'UNKNOWN'}\n`;
+  message += `└ Daily: ${foreign.daily_net || 'N/A'}\n\n`;
+
   message += `<b>4. Sector Strength:</b>\n`;
-  const sectors = market.analysis.sector_strength.sectors;
+  const sectors = market.analysis.sector_strength?.sectors || {};
   Object.keys(sectors).forEach(s => {
     const sEmoji = sectors[s].score > 0 ? '✅' : sectors[s].score < 0 ? '❌' : '⚪';
-    message += `${sEmoji} ${s}: ${sectors[s].performance}\n`;
+    message += `${sEmoji} ${s}: ${sectors[s].performance || 'N/A'}\n`;
   });
 
   // RS ENHANCEMENT: Sector Ranking
@@ -173,8 +196,29 @@ function formatSectorLeadersMessage(results) {
   return message;
 }
 
+/**
+ * Telegram rejects messages over 4096 chars. Split on line boundaries so
+ * HTML tags are never cut mid-tag.
+ */
+function chunkMessage(message, limit = 3800) {
+  if (message.length <= limit) return [message];
+  const chunks = [];
+  let cur = '';
+  for (const line of message.split('\n')) {
+    if (cur.length + line.length + 1 > limit) {
+      if (cur) chunks.push(cur);
+      cur = line;
+    } else {
+      cur += (cur ? '\n' : '') + line;
+    }
+  }
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 module.exports = {
   initBot,
+  chunkMessage,
   formatAnalysisMessage,
   formatGroupedAnalysisMessage,
   formatMarketMessage,

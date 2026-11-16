@@ -82,6 +82,12 @@ TELEGRAM_BOT_TOKEN=your_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 MAX_STOCK_PRICE=500
 STOCK_SYMBOLS=ALL # Gunakan ALL untuk scan seluruh IDX
+
+# Opsional - lapisan advisory AI. Kosongkan untuk mematikan.
+AI_API_KEY=
+AI_BASE_URL=https://9router.tefambo.site/v1
+AI_MODEL=Hermes-Combo
+AI_ENABLED=true
 ```
 
 ### 3. Menjalankan Bot
@@ -123,6 +129,36 @@ tetap berada di VPS.
 
 ---
 
+## 🤖 Lapisan AI (opsional)
+
+AI **tidak pernah** menentukan skor, urutan, atau label rekomendasi. Semua keputusan tetap
+dari rule engine dan model terkalibrasi. AI hanya menambah dua hal pada 20 saham yang sudah
+lolos ranking:
+
+| Lapisan | Sumber | Pengaruh |
+|---|---|---|
+| Sentimen berita | Google News RSS -> LLM (skor -1..+1) | Tampilan saja |
+| Narasi | LLM, membaca angka yang sudah ada | Tampilan saja |
+
+Tanpa `AI_API_KEY` bot berjalan identik seperti sebelumnya. Jika provider lambat atau gagal,
+kedua lapisan dilewati dan analisis tetap terkirim (timeout keras 25 detik, hasil di-cache).
+
+## 📊 Evaluasi & Kalibrasi Model
+
+```bash
+npm run backtest   # unduh & simpan fitur point-in-time (lambat, sekali saja)
+npm run report     # metrik rule engine + perbandingan ranker
+npm run train      # latih model.json, hanya menulis jika beat baseline
+```
+
+Hasil terukur pada 43 saham IDX, 2024-08..2026-10 (21.664 baris, 512 tanggal):
+
+- Rule engine **tidak punya edge ranking**: top-20/hari selisih -0.01% vs rata-rata.
+- Model 20 hari punya **timing skill**, bukan picking skill: pooled AUC 0.593 OOS, tetapi
+  cross-sectional AUC 0.467 (di bawah acak). Karena itu model dipakai sebagai *market timing
+  gate*, bukan ranker.
+- Hari dengan rata-rata `mlProb` >= 0.45 -> +1.58% forward 20 hari (43 hari OOS).
+  Hari < 0.40 -> -5.4% s/d -12.5%.
 ## 📱 Perintah Telegram
 
 - `/start`: Memulai interaksi dengan bot.

@@ -1,9 +1,11 @@
 'use strict';
 
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const { fetchHistory } = require('../utils/yahoo');
 const logger = require('../utils/logger');
 const { SECTOR_PROXIES } = require('../utils/sectorMapping');
+
+const CACHE_TTL_MS = 3600000; // 1 hour
+const HISTORY_DAYS = 200;
 
 class RSEngine {
   constructor() {
@@ -14,7 +16,9 @@ class RSEngine {
       { label: '3M', days: 60, weight: 0.3 }
     ];
     this.sectorPerformanceCache = null;
+    this.sectorPerformanceAt = 0;
     this.ihsgPerformanceCache = null;
+    this.ihsgPerformanceAt = 0;
   }
 
   /**
@@ -32,14 +36,12 @@ class RSEngine {
    * Get IHSG performance for all timeframes
    */
   async getIHSGPerformance() {
-    if (this.ihsgPerformanceCache) return this.ihsgPerformanceCache;
+    if (this.ihsgPerformanceCache && Date.now() - this.ihsgPerformanceAt < CACHE_TTL_MS) {
+      return this.ihsgPerformanceCache;
+    }
 
     try {
-      const history = await yahooFinance.historical('^JKSE', {
-        period1: this.getStartDate(90), // 3 months
-        period2: new Date(),
-        interval: '1d'
-      });
+      const history = await fetchHistory('^JKSE', HISTORY_DAYS);
 
       const performance = {};
       this.timeframes.forEach(tf => {
@@ -47,6 +49,7 @@ class RSEngine {
       });
 
       this.ihsgPerformanceCache = performance;
+      this.ihsgPerformanceAt = Date.now();
       return performance;
     } catch (err) {
       logger.error(`[RSEngine] Error fetching IHSG history: ${err.message}`);
@@ -58,7 +61,9 @@ class RSEngine {
    * Get sector performance based on proxies
    */
   async getSectorPerformances() {
-    if (this.sectorPerformanceCache) return this.sectorPerformanceCache;
+    if (this.sectorPerformanceCache && Date.now() - this.sectorPerformanceAt < CACHE_TTL_MS) {
+      return this.sectorPerformanceCache;
+    }
 
     const sectorPerformances = {};
     const ihsgPerf = await this.getIHSGPerformance();
@@ -68,11 +73,7 @@ class RSEngine {
         // Fetch history for each proxy ticker and average them
         const proxyResults = await Promise.all(tickers.map(async (ticker) => {
           try {
-            const history = await yahooFinance.historical(ticker, {
-              period1: this.getStartDate(90),
-              period2: new Date(),
-              interval: '1d'
-            });
+            const history = await fetchHistory(ticker, HISTORY_DAYS);
             const perf = {};
             this.timeframes.forEach(tf => {
               perf[tf.label] = this.calculateReturn(history, tf.days);
@@ -140,6 +141,7 @@ class RSEngine {
     });
 
     this.sectorPerformanceCache = sectorPerformances;
+    this.sectorPerformanceAt = Date.now();
     return sectorPerformances;
   }
 
@@ -170,12 +172,6 @@ class RSEngine {
     });
 
     return { rsScore: totalRS, benchmark: sectorName };
-  }
-
-  getStartDate(days) {
-    const d = new Date();
-    d.setDate(d.getDate() - days);
-    return d;
   }
 }
 
