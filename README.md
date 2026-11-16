@@ -93,6 +93,34 @@ npm start
 npm run pm2:start
 ```
 
+### 4. Deploy Otomatis ke VPS
+
+Workflow GitHub Actions menjalankan pemeriksaan saat ada push ke `main`. Jika
+lulus, workflow mengambil versi terbaru di VPS pada `/opt/stock_bot`, memasang
+dependensi produksi, lalu me-reload (atau memulai) proses PM2 `stock-bot`.
+Workflow juga bisa dijalankan manual dari tab **Actions**.
+
+Siapkan VPS terlebih dahulu:
+- Clone repository ke `/opt/stock_bot`, dan pastikan remote `origin` mengarah ke
+  repository ini dengan branch `main`.
+- Buat file `.env` di direktori tersebut, instal Node.js/npm dan PM2.
+- Pastikan user SSH yang dipakai workflow dapat menjalankan `git`, `npm`, dan
+  `pm2` tanpa interaksi serta memiliki akses tulis ke direktori proyek.
+
+Tambahkan di **Settings → Secrets and variables → Actions**:
+
+| Nama | Jenis | Isi |
+| --- | --- | --- |
+| `VPS_HOST` | Secret | IP atau hostname VPS |
+| `VPS_USER` | Secret | User SSH untuk deploy |
+| `VPS_SSH_PRIVATE_KEY` | Secret | Private key SSH; public key pasang pada `authorized_keys` user VPS |
+| `VPS_KNOWN_HOSTS` | Secret | Baris host key SSH VPS yang sudah diverifikasi |
+| `VPS_PORT` | Variable (opsional) | Port SSH; default `22` |
+
+Workflow menjalankan `git reset --hard origin/main` pada VPS, jadi perubahan
+langsung pada file kode di VPS akan ditimpa. File `.env` tidak dilacak Git dan
+tetap berada di VPS.
+
 ---
 
 ## 📱 Perintah Telegram

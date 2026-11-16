@@ -1,0 +1,86 @@
+name: CI/CD - Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: stockbot-production
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Validate project
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: |
+          find . -type f -name '*.js' \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -print0 | xargs -0 -r -n1 node --check
+
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    permissions: {}
+    steps:
+      - name: Deploy over SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${VPS_HOST:?Add the VPS_HOST repository secret}"
+          : "${VPS_USER:?Add the VPS_USER repository secret}"
+          : "${VPS_SSH_PRIVATE_KEY:?Add the VPS_SSH_PRIVATE_KEY repository secret}"
+          : "${VPS_KNOWN_HOSTS:?Add the VPS_KNOWN_HOSTS repository secret}"
+
+          key_file="$(mktemp)"
+          known_hosts_file="$(mktemp)"
+          trap 'rm -f "$key_file" "$known_hosts_file"' EXIT
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$known_hosts_file"
+          chmod 600 "$known_hosts_file"
+
+          ssh \
+            -i "$key_file" \
+            -p "$VPS_PORT" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$known_hosts_file" \
+            "$VPS_USER@$VPS_HOST" 'bash -se' <<'REMOTE'
+          set -euo pipefail
+          cd /opt/stock_bot
+          git fetch origin main
+          git reset --hard origin/main
+          npm ci --omit=dev
+          if pm2 describe stock-bot >/dev/null 2>&1; then
+            pm2 reload stock-bot --update-env
+          else
+            pm2 start index.js --name stock-bot
+          fi
+          pm2 save
+          REMOTE
