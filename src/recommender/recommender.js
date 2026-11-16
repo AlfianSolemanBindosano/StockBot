@@ -1,0 +1,188 @@
+'use strict';
+
+const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance = new YahooFinance();
+const { calculateIndicators } = require('./indicators');
+const { analyzeStock } = require('./analyzer');
+const logger = require('../utils/logger');
+
+let cachedMarketRegime = null;
+let lastMarketRegimeUpdate = 0;
+
+/**
+ * Analyze IHSG to determine market regime.
+ */
+async function getMarketRegime() {
+  const now = Date.now();
+  if (cachedMarketRegime && (now - lastMarketRegimeUpdate < 3600000)) { // Cache for 1 hour
+    return cachedMarketRegime;
+  }
+
+  try {
+    const symbol = '^JKSE';
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setMonth(startDate.getMonth() - 6);
+
+    const history = await yahooFinance.historical(symbol, {
+      period1: startDate,
+      period2: endDate,
+      interval: '1d'
+    });
+
+    const indicators = calculateIndicators(history);
+    const isBullish = indicators.lastClose > indicators.sma50;
+    
+    cachedMarketRegime = {
+      isBullish,
+      rsi: indicators.rsi,
+      lastClose: indicators.lastClose,
+      sma50: indicators.sma50
+    };
+    lastMarketRegimeUpdate = now;
+    
+    logger.info(`[MarketRegime] IHSG is ${isBullish ? 'BULLISH' : 'BEARISH'} (Close: ${indicators.lastClose.toFixed(0)}, SMA50: ${indicators.sma50.toFixed(0)})`);
+    return cachedMarketRegime;
+  } catch (error) {
+    logger.error(`[MarketRegime] Error analyzing IHSG: ${error.message}`);
+    return { isBullish: true }; // Default to bullish if check fails
+  }
+}
+
+/**
+ * Generate a recommendation for a given stock symbol.
+ * @param {string} symbol - Stock symbol.
+ * @param {number} maxPriceOverride - Optional max price override.
+ * @returns {Promise<Object>} Recommendation details.
+ */
+async function getRecommendation(symbol, maxPriceOverride = null) {
+  try {
+    logger.info(`[Recommender] Fetching data for ${symbol}...`);
+
+    // 1. Fetch Market Regime first
+    const marketRegime = await getMarketRegime();
+
+    // 2. Fetch Analyst Recommendations and Financials
+    const summary = await yahooFinance.quoteSummary(symbol, {
+      modules: ['recommendationTrend', 'financialData', 'price', 'summaryDetail']
+    });
+
+    const price = summary.price?.regularMarketPrice;
+    const volume = summary.price?.regularMarketVolume || summary.summaryDetail?.volume;
+    
+    // Use override if provided, otherwise fallback to .env or default 500
+    const maxPrice = maxPriceOverride || parseInt(process.env.MAX_STOCK_PRICE || '500', 10);
+
+    if (!price || price === 0 || !volume || volume === 0) {
+      return { symbol, skipped: true, reason: 'Inactive or suspended' };
+    }
+
+    if (price > maxPrice) {
+      return { symbol, skipped: true, reason: `Price ${price} above limit (${maxPrice})` };
+    }
+
+    // 3. Fetch Historical Data (Daily & Weekly)
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setMonth(startDate.getMonth() - 6);
+
+    // Daily
+    const historyDaily = await yahooFinance.historical(symbol, {
+      period1: startDate,
+      period2: endDate,
+      interval: '1d'
+    });
+
+    // Weekly (for confirmation)
+    const historyWeekly = await yahooFinance.historical(symbol, {
+      period1: startDate,
+      period2: endDate,
+      interval: '1wk'
+    });
+
+    if (historyDaily.length < 50) {
+      return { symbol, skipped: true, reason: 'Insufficient daily data' };
+    }
+
+    // 4. Calculate Indicators & Stats
+    const indicatorsDaily = calculateIndicators(historyDaily);
+    const indicatorsWeekly = historyWeekly.length >= 20 ? calculateIndicators(historyWeekly) : null;
+
+    // 20-day Average Volume & Highest High
+    const last20Days = historyDaily.slice(-20);
+    const avgVolume20 = last20Days.reduce((acc, curr) => acc + (curr.volume || 0), 0) / 20;
+    const highestHigh20 = Math.max(...last20Days.map(d => d.high));
+
+    // Multi-Timeframe Confirmation
+    let weeklyConfirmed = false;
+    if (indicatorsWeekly) {
+      // Weekly confirmation if Weekly price > Weekly SMA20 or RSI > 50
+      weeklyConfirmed = indicatorsWeekly.lastClose > indicatorsWeekly.sma20 || indicatorsWeekly.rsi > 50;
+    }
+
+    // Calculate Sector RS
+    let sectorRS = { sector: 'Lainnya', rsScore: 0, rank: 99, isTopTier: false };
+    try {
+      const { getSectorForTicker } = require('../utils/sectorMapping');
+      const rsEngine = require('./rsEngine');
+      const sector = getSectorForTicker(symbol);
+      const rsData = await rsEngine.calculateStockRS(symbol, sector, historyDaily);
+      const sectorRankings = await rsEngine.getSectorPerformances();
+      const sectorData = sectorRankings[sector];
+
+      sectorRS = {
+        sector,
+        rsScore: parseFloat(rsData.rsScore.toFixed(2)),
+        rank: sectorData ? sectorData.rank : 99,
+        isTopTier: sectorData ? sectorData.rank <= 3 : false
+      };
+    } catch (e) {
+      logger.error(`[Recommender] Sector RS calculation failed for ${symbol}: ${e.message}`);
+    }
+
+    // 5. Run Analyzer
+    const analysis = analyzeStock({
+      symbol,
+      history: historyDaily,
+      indicators: indicatorsDaily,
+      marketRegime,
+      analystTrends: summary.recommendationTrend?.trend?.[0],
+      avgVolume20,
+      highestHigh20,
+      weeklyConfirmed,
+      sectorRS
+    });
+
+    if (analysis.skipped) return analysis;
+
+    return {
+      symbol,
+      name: summary.price?.longName || symbol,
+      price: price,
+      recommendation: analysis.recommendation,
+      score: analysis.score,
+      confidence: analysis.confidence,
+      weightedScore: analysis.weightedScore,
+      rsScore: analysis.rsScore || sectorRS.rsScore,
+      sector: analysis.sector || sectorRS.sector,
+      flags: analysis.flags,
+      riskMgmt: analysis.riskMgmt,
+      indicators: {
+        rsi: indicatorsDaily.rsi?.toFixed(2),
+        sma20: indicatorsDaily.sma20?.toFixed(2),
+        sma50: indicatorsDaily.sma50?.toFixed(2),
+        macd: indicatorsDaily.macd
+      },
+      weeklyConfirmed
+    };
+
+  } catch (error) {
+    logger.error(`[Recommender] Error analyzing ${symbol}: ${error.message}`);
+    return { symbol, error: error.message };
+  }
+}
+
+module.exports = {
+  getRecommendation,
+  getMarketRegime
+};
